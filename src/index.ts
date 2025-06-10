@@ -5,6 +5,7 @@ import fs from "fs";
 import * as cheerio from "cheerio";
 import { URLSearchParams } from "url";
 import puppeteer from "puppeteer";
+import crypto from "crypto";
 
 const LOGIN_URL = "https://challenge.sunvoy.com/login";
 const USER_LIST_URL = "https://challenge.sunvoy.com/list";
@@ -14,59 +15,96 @@ const JSON_FILE_PATH = "users.json";
 const USERNAME = "demo@example.org";
 const PASSWORD = "test";
 
-async function getSettingsPageData() {
-  const browser = await puppeteer.launch({
-    headless: false, // set to false to watch the browser in action
-    // args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-  var page = await browser.newPage();
-  await page.setRequestInterception(true);
-  // page.setDefaultNavigationTimeout(0);
-  page.on("request", (request) => {
-    if (request.resourceType() === "xhr") {
-      console.log("AJAX request:", request.url());
-    }
-    request.continue();
-  });
-  await page.goto(LOGIN_URL);
+function urlSearchParamsToJSON(params: URLSearchParams): Record<any, any> {
+  const result: Record<string, any> = {};
 
-  // Step 1: Fill in and submit the login form
-  await page.type('[name="username"]', USERNAME);
-  await page.type('[name="password"]', PASSWORD);
-  await page.click('button[type="submit"]');
-  await page.waitForNavigation({
-    waitUntil: "domcontentloaded",
-  }); // wait for redirect after login
+  for (const [key, value] of params.entries()) {
+    const existing = result[key];
+    result[key] = existing === undefined 
+      ? value 
+      : Array.isArray(existing) 
+        ? [...existing, value] 
+        : [existing, value];
+  }
 
-  await page.click(".mt-6 > a");
-
-  // monitor AJAX requests directly:
-  page.on("response", async (response) => {
-    // console.log(response.url());
-    if (response.url().includes("/api/settings") && response.status() === 200) {
-      const data = await response.json();
-      console.log("AJAX response Api settings:", data);
-
-      let jsonData = fs.readFileSync(JSON_FILE_PATH, "utf-8");
-
-      let exdata = JSON.parse(jsonData);
-      exdata.loggedInUser = data;
-      const updatedJson = JSON.stringify(exdata, null, 2);
-      fs.writeFileSync(JSON_FILE_PATH, updatedJson);
-    }
-  });
-
-  // scraping User Settings
-  const settingsPage = await page.goto(USER_PROFILE_URL, {
-    waitUntil: "domcontentloaded",
-  });
-  await page.waitForSelector("#settingsContent form", { timeout: 10000 });
-
-  const pageContent = await page.content();
-  //   console.log(pageContent);
-
-  await browser.close();
+  return result;
 }
+
+async function getLoggedinUserData(cookieHeader:any) {
+  const e = Math.floor(Date.now() / 1e3);
+
+  const tokenPage = await fetch(
+    "https://challenge.sunvoy.com/settings/tokens",
+    {
+      method: "GET",
+      headers: {
+        Cookie: cookieHeader,
+      },
+      // credentials: "include", // Include credentials
+    }
+  );
+  var tokenPageHtml = await tokenPage.text();
+
+  const $ = cheerio.load(tokenPageHtml);
+  const form = $("body");
+  const formData = new URLSearchParams();
+
+  // Extract all hidden input fields
+  form.find("input[type=hidden]").each((_, el) => {
+    const name = $(el).attr("id");
+    const value = $(el).attr("value") || '';
+    // console.log(name, value);
+    if (name) formData.append(name, value);
+  });
+
+  const timestamp = Math.floor(Date.now() / 1000).toString(); // Unix timestamp in seconds
+
+  formData.append("timestamp", timestamp);
+
+  const params: Record<string, any>  = urlSearchParamsToJSON(formData);
+  const strToSign = Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${encodeURIComponent(params[key])}`)
+    .join("&");
+
+  const secret = "mys3cr3t";
+
+  const checkcode = crypto
+    .createHmac("sha1", secret)
+    .update(strToSign)
+    .digest("hex");
+
+  // Step 4: Append timestamp and checkcode
+  formData.append("checkcode", checkcode.toUpperCase());
+
+  // console.log("tokens: ", formData.toString());
+
+  const loggedInUserInfo = await fetch(
+    "https://api.challenge.sunvoy.com/api/settings",
+    {
+      method: "POST",
+      headers: {
+        Cookie: cookieHeader,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+
+      body: formData.toString(),
+      // credentials: "include", // Include credentials
+    }
+  );
+  var loggedInUser = await loggedInUserInfo.json();
+  console.log("loggedin user info", loggedInUser);
+
+  //update loggedin user info to json file
+  let jsonData = fs.readFileSync(JSON_FILE_PATH, "utf-8");
+  let exdata = JSON.parse(jsonData);
+  exdata.loggedInUser = loggedInUser;
+  const updatedJson = JSON.stringify(exdata, null, 2);
+  fs.writeFileSync(JSON_FILE_PATH, updatedJson);
+  console.log("Loggedin user info writen to users.json file");
+  return loggedInUser;
+}
+
 
 async function loginViaForm() {
 
@@ -108,14 +146,14 @@ async function loginViaForm() {
 
   console.log("Login response: ", postBody);
 
-  //   // Step 3: verify authentication via a protected page
-  const dashboardRes = await fetch("https://challenge.sunvoy.com/list", {
-    method: "GET",
-    headers: {
-      Cookie: cookieHeader,
-    },
-  });
-  const dashHtml = await dashboardRes.text();
+  //   // verify authentication via a protected page
+  // const dashboardRes = await fetch("https://challenge.sunvoy.com/list", {
+  //   method: "GET",
+  //   headers: {
+  //     Cookie: cookieHeader,
+  //   },
+  // });
+  // const dashHtml = await dashboardRes.text();
   //   console.log(dashHtml);
   // console.log("Dashboard snippet:", dashHtml.slice(0, 500));
 
@@ -140,7 +178,7 @@ async function loginViaForm() {
   });
   
   //get current loggedin user
-  await getSettingsPageData();
+  await getLoggedinUserData(cookieHeader);
 }
 
 loginViaForm().catch(console.error);
