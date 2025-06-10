@@ -14,6 +14,60 @@ const JSON_FILE_PATH = "users.json";
 const USERNAME = "demo@example.org";
 const PASSWORD = "test";
 
+async function getSettingsPageData() {
+  const browser = await puppeteer.launch({
+    headless: false, // set to false to watch the browser in action
+    // args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  var page = await browser.newPage();
+  await page.setRequestInterception(true);
+  // page.setDefaultNavigationTimeout(0);
+  page.on("request", (request) => {
+    if (request.resourceType() === "xhr") {
+      console.log("AJAX request:", request.url());
+    }
+    request.continue();
+  });
+  await page.goto(LOGIN_URL);
+
+  // Step 1: Fill in and submit the login form
+  await page.type('[name="username"]', USERNAME);
+  await page.type('[name="password"]', PASSWORD);
+  await page.click('button[type="submit"]');
+  await page.waitForNavigation({
+    waitUntil: "domcontentloaded",
+  }); // wait for redirect after login
+
+  await page.click(".mt-6 > a");
+
+  // monitor AJAX requests directly:
+  page.on("response", async (response) => {
+    // console.log(response.url());
+    if (response.url().includes("/api/settings") && response.status() === 200) {
+      const data = await response.json();
+      console.log("AJAX response Api settings:", data);
+
+      let jsonData = fs.readFileSync(JSON_FILE_PATH, "utf-8");
+
+      let exdata = JSON.parse(jsonData);
+      exdata.loggedInUser = data;
+      const updatedJson = JSON.stringify(exdata, null, 2);
+      fs.writeFileSync(JSON_FILE_PATH, updatedJson);
+    }
+  });
+
+  // scraping User Settings
+  const settingsPage = await page.goto(USER_PROFILE_URL, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector("#settingsContent form", { timeout: 10000 });
+
+  const pageContent = await page.content();
+  //   console.log(pageContent);
+
+  await browser.close();
+}
+
 async function loginViaForm() {
 
   // GET login page to retrieve hidden fields
@@ -84,7 +138,9 @@ async function loginViaForm() {
       console.log("JSON written to users.json");
     }
   });
-
+  
+  //get current loggedin user
+  await getSettingsPageData();
 }
 
 loginViaForm().catch(console.error);
